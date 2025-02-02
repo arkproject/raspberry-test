@@ -148,30 +148,27 @@ class BLEScanner {
             );
             return [];
         }
-
+    
         try {
             await this.initialize();
             this.isScanning = true;
-
+    
             this.eventManager.emit('scanner:scan_started', {
                 duration: scanDuration,
                 timestamp: getCurrentTimestamp()
             });
-
+    
             // Utilizziamo BLEDiscovery per la scansione
             await this.bleDiscovery.startDiscovery();
-
-            // return new Promise((resolve) => {
-            //     setTimeout(async () => {
-            //         await this.stopScan();
-            //         resolve(this.bleDiscovery.getDiscoveredDevices());
-            //     }, scanDuration);
-            // });
-            // Imposta il timer per fermare la scansione
-            setTimeout(async () => {
-                await this.stopScan();
-            }, scanDuration);
-
+    
+            // Modifica qui: usa una Promise invece del setTimeout
+            return new Promise((resolve) => {
+                this.scanTimeout = setTimeout(async () => {
+                    await this.stopScan();
+                    resolve(this.bleDiscovery.getDiscoveredDevices());
+                }, scanDuration);
+            });
+    
         } catch (error) {
             handleError(
                 new BLEError(
@@ -181,7 +178,7 @@ class BLEScanner {
                 ),
                 'BLEScanner.startScan'
             );
-
+    
             await this.cleanup();
             return [];
         }
@@ -191,17 +188,29 @@ class BLEScanner {
      * Ferma la scansione in corso
      */
     async stopScan() {
-        if (!this.isScanning) return;
-
+        if (!this.isScanning) {
+            console.log('StopDiscovery chiamato: la discovery non era attiva');
+            return;
+        }
+    
         try {
+            // Prima imposta isScanning a false
             this.isScanning = false;
+            
+            // Cancella il timeout se esiste
+            if (this.scanTimeout) {
+                clearTimeout(this.scanTimeout);
+                this.scanTimeout = null;
+            }
+    
+            // Poi ferma la discovery
             await this.bleDiscovery.stopDiscovery();
-
+    
             this.eventManager.emit('scanner:scan_stopped', {
                 devicesFound: this.bleDiscovery.getDiscoveredDevices().length,
                 timestamp: getCurrentTimestamp()
             });
-
+    
         } catch (error) {
             handleError(
                 new BLEError(
@@ -554,23 +563,34 @@ class BLEScanner {
             this.eventManager.emit('scanner:cleanup_start', {
                 timestamp: getCurrentTimestamp()
             });
-
+    
+            // Cancella il timeout di scansione se esiste
+            if (this.scanTimeout) {
+                clearTimeout(this.scanTimeout);
+                this.scanTimeout = null;
+            }
+    
             if (this.reconnectTimer) {
                 clearTimeout(this.reconnectTimer);
                 this.reconnectTimer = null;
             }
-
+    
+            // Se sta ancora scansionando, ferma la scansione
+            if (this.isScanning) {
+                await this.stopScan();
+            }
+    
             await this.disconnect();
             await this.bleDiscovery.cleanup();
             await this.bleConnection.cleanup();
-
+    
             this.isScanning = false;
             this.adapter = null;
-
+    
             this.eventManager.emit('scanner:cleanup_complete', {
                 timestamp: getCurrentTimestamp()
             });
-
+    
         } catch (error) {
             this.eventManager.emit('scanner:cleanup_error', {
                 error: error.message,
