@@ -1,0 +1,14 @@
+node_modules
+.env
+.py
+.log
+scripts
+*.md
+*.env-heroku-test
+src/scanner
+.env.prod
+.env.test
+*.log
+logs
+src/bluetooth/bluetoothOLD
+old
