@@ -1,3 +1,11 @@
+/**
+ * BLEDataHandler.js
+ * Gestisce la decodifica e il salvataggio dei dati ricevuti dal dispositivo BLE
+ * Created: 2025-02-02 17:19:59
+ * Author: arkproject
+ * Version: 2.1.0
+ */
+
 const { BLEError, handleError, ErrorCodes } = require('../utils/errorHandler');
 const BLELogger = require('../utils/BLELogger');
 const { getCurrentTimestamp } = require('../utils/dateUtils');
@@ -5,17 +13,30 @@ const BLEStatistics = require('../utils/BLEStatistics');
 const settings = require('../config/settings');
 const EventEmitter = require('events');
 
-// (gestione dati)
+/**
+ * Eventi emessi da BLEDataHandler
+ * @readonly
+ * @enum {string}
+ */
+const BLEDataEvents = {
+    DATA_RECEIVED: 'data:received',      // Quando arrivano nuovi dati raw
+    DATA_DECODED: 'data:decoded',        // Quando i dati sono stati decodificati con successo
+    DATA_ERROR: 'data:error',           // Quando c'è un errore nella decodifica
+    SEQUENCE_ERROR: 'data:sequence_error', // Quando viene rilevato un errore di sequenza
+    LOG_ERROR: 'data:log_error',        // Quando c'è un errore nel logging
+    CLEANUP_START: 'data:cleanup_start', // Quando inizia il cleanup
+    CLEANUP_COMPLETE: 'data:cleanup_complete' // Quando il cleanup è completato
+};
+
 class BLEDataHandler extends EventEmitter {
     constructor() {
-        super ();
+        super();
         this.logger = new BLELogger();
         this.statistics = new BLEStatistics();
         this.lastProcessedData = null;
         this.dataValidationRules = {
             minBufferLength: 20,
             maxBufferLength: 20,
-            validDataTypes: new Set(['Int16', 'Uint16']),
             valueRanges: {
                 numero_progressivo: { min: 0, max: 65535 },
                 asse_x: { min: -32768, max: 32767 },
@@ -30,6 +51,31 @@ class BLEDataHandler extends EventEmitter {
         };
     }
 
+    /**
+     * Gestisce i dati in arrivo dal dispositivo BLE
+     * @param {Buffer} buffer - Buffer contenente i dati raw
+     * @returns {Object} Dati decodificati
+     */
+    handleIncomingData(buffer) {
+        this.emit(BLEDataEvents.DATA_RECEIVED, {
+            timestamp: getCurrentTimestamp(),
+            rawData: buffer.toString('hex')
+        });
+        
+        try {
+            const decodedData = this.decodeData(buffer);
+            this.emit(BLEDataEvents.DATA_DECODED, decodedData);
+            return decodedData;
+        } catch (error) {
+            this.emit(BLEDataEvents.DATA_ERROR, error);
+            throw error;
+        }
+    }
+
+    /**
+     * Decodifica i dati dal buffer
+     * @private
+     */
     decodeData(buffer) {
         const timestamp = getCurrentTimestamp();
 
@@ -37,21 +83,41 @@ class BLEDataHandler extends EventEmitter {
             this.validateBuffer(buffer);
             const decodedData = this.parseBuffer(buffer);
             this.validateDecodedData(decodedData);
+            
+            // Controllo sequenza
+            this.checkSequence(decodedData);
 
-            // Aggiungi timestamp e raw hex
+            // Arricchimento dati
             decodedData.timestamp = timestamp;
             decodedData.raw_hex = buffer.toString('hex');
 
-            // Aggiorna statistiche e log
-            this.updateStatistics(decodedData);
+            // Salvataggio e statistiche
             this.logData(decodedData);
-
+            this.updateStatistics(decodedData);
+            
             this.lastProcessedData = decodedData;
             return decodedData;
 
         } catch (error) {
             this.handleDecodingError(error, buffer, timestamp);
             throw error;
+        }
+    }
+
+    /**
+     * Verifica la sequenza dei dati
+     * @private
+     */
+    checkSequence(currentData) {
+        if (this.lastProcessedData) {
+            const expectedSequence = (this.lastProcessedData.numero_progressivo + 1) % 65536;
+            if (currentData.numero_progressivo !== expectedSequence) {
+                this.emit(BLEDataEvents.SEQUENCE_ERROR, {
+                    expected: expectedSequence,
+                    received: currentData.numero_progressivo,
+                    timestamp: currentData.timestamp
+                });
+            }
         }
     }
 
@@ -78,7 +144,9 @@ class BLEDataHandler extends EventEmitter {
     }
 
     parseBuffer(buffer) {
-        const view = new DataView(buffer.buffer, buffer.byteOffset);
+        // Utilizzo di Uint8Array per una gestione più sicura del buffer
+        const uint8Array = new Uint8Array(buffer);
+        const view = new DataView(uint8Array.buffer);
 
         try {
             return {
@@ -130,22 +198,22 @@ class BLEDataHandler extends EventEmitter {
 
     updateStatistics(decodedData) {
         this.statistics.incrementCounter();
-
-        // Aggiorna altre statistiche se necessario
+        
         if (settings.DATA_ANALYSIS.ENABLED) {
             this.updateDataAnalysis(decodedData);
         }
     }
 
     updateDataAnalysis(decodedData) {
-        // Implementa qui l'analisi dei dati in tempo reale se richiesta
-        // Ad esempio: calcolo medie mobili, rilevamento anomalie, ecc.
+        // Per ora solo placeholder, implementeremo l'analisi più avanti
+        // quando avremo definito meglio i requisiti di analisi
     }
 
     logData(decodedData) {
         try {
             this.logger.writeData(decodedData);
         } catch (error) {
+            this.emit(BLEDataEvents.LOG_ERROR, error);
             handleError(
                 new BLEError(
                     'Errore durante il logging dei dati',
@@ -164,10 +232,7 @@ class BLEDataHandler extends EventEmitter {
             buffer: buffer ? buffer.toString('hex') : 'buffer non disponibile'
         };
 
-        // Log dell'errore
         this.logger.writeError(errorData);
-
-        // Aggiorna statistiche errori se necessario
         this.statistics.incrementErrorCount();
 
         handleError(
@@ -194,14 +259,33 @@ class BLEDataHandler extends EventEmitter {
     }
 
     async cleanup() {
+        this.emit(BLEDataEvents.CLEANUP_START);
+        
         try {
-            await this.logger.flush();
-            this.resetStatistics();
-            this.lastProcessedData = null;
+            await Promise.all([
+                this.logger.flush(),
+                new Promise(resolve => {
+                    this.resetStatistics();
+                    this.lastProcessedData = null;
+                    resolve();
+                })
+            ]);
+            
+            this.emit(BLEDataEvents.CLEANUP_COMPLETE);
         } catch (error) {
-            console.error('Error during BLEDataHandler cleanup:', error);
+            handleError(
+                new BLEError(
+                    'Errore durante il cleanup',
+                    ErrorCodes.BLE.CLEANUP_ERROR,
+                    { error: error.message }
+                ),
+                'BLEDataHandler.cleanup'
+            );
         }
     }
 }
 
-module.exports = BLEDataHandler;
+module.exports = {
+    BLEDataHandler,
+    BLEDataEvents
+};
