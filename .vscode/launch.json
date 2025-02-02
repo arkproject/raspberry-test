@@ -1,0 +1,25 @@
+{
+    // Usare IntelliSense per informazioni sui possibili attributi.
+    // Al passaggio del mouse vengono visualizzate le descrizioni degli attributi esistenti.
+    // Per altre informazioni, visitare: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Launch Program",
+            "skipFiles": ["<node_internals>/**"],
+            "program": "${workspaceFolder}/scan.js"
+          },
+          {
+            "type": "node",
+            "request": "attach",
+            "name": "Attach to Node on Raspberry Pi",
+            "address": "127.0.0.1", // IP del Raspberry Pi
+            "port": 9229,
+            "localRoot": "${workspaceFolder}",  // Cartella locale sul Raspberry Pi
+            "remoteRoot": "/home/ark/Raspberry-gateway/test_new.js",  // Cartella del progetto sul Raspberry Pi
+            "skipFiles": ["<node_internals>/**"]
+          }
+    ]
+}
