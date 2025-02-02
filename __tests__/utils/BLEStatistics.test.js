@@ -1,6 +1,6 @@
 /**
  * Test suite for BLEStatistics class
- * Created: 2025-02-02 17:44:27
+ * Updated: 2025-02-02 17:55:43
  * Author: arkproject
  */
 
@@ -9,9 +9,18 @@ const { getCurrentTimestamp } = require('../../src/utils/dateUtils');
 
 describe('BLEStatistics', () => {
     let bleStats;
+    let originalDate;
 
     beforeEach(() => {
         bleStats = new BLEStatistics();
+    });
+
+    afterEach(() => {
+        // Ripristina Date originale dopo ogni test
+        if (originalDate) {
+            global.Date = originalDate;
+        }
+        jest.useRealTimers();
     });
 
     test('should initialize with correct default values', () => {
@@ -73,16 +82,17 @@ describe('BLEStatistics', () => {
     });
 
     test('should calculate uptime correctly', () => {
-        // Mock getCurrentTimestamp to return a fixed time
-        const startTime = '2025-02-02 17:44:27';
-        jest.spyOn(Date.prototype, 'getTime').mockImplementation(() => {
-            return new Date(startTime).getTime() + 5000; // Add 5 seconds
-        });
-
+        jest.useFakeTimers();
+        
+        // Imposta un tempo di inizio fisso
+        const startTime = new Date('2025-02-02T17:55:43.000Z');
+        bleStats.stats.session.startTime = startTime.toISOString();
+        
+        // Avanza il tempo di 5 secondi
+        jest.setSystemTime(startTime.getTime() + 5000);
+        
         const stats = bleStats.getStats();
-        expect(stats.uptime).toBe(5); // Should be 5 seconds
-
-        jest.restoreAllMocks();
+        expect(stats.uptime).toBe(5); // Dovrebbe essere 5 secondi
     });
 
     test('should handle multiple operations correctly', () => {

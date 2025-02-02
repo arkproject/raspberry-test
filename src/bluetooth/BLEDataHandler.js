@@ -29,7 +29,7 @@ const BLEDataEvents = {
 };
 
 class BLEDataHandler extends EventEmitter {
-    constructor() {
+    constructor(logger = new BLELogger(), statistics = new BLEStatistics()) {
         super();
         this.logger = new BLELogger();
         this.statistics = new BLEStatistics();
