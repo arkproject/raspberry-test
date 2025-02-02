@@ -40,7 +40,7 @@ class BLEDiscovery {
                 ErrorCodes.BLE.INVALID_PARAMETER
             );
         }
-        
+
         this.eventManager = eventManager;
         this.isDiscovering = false;
         // Mappa per tracciare i dispositivi univoci
@@ -48,7 +48,7 @@ class BLEDiscovery {
         // Timer usato in altri contesti (es. findDevice)
         this.discoveryTimer = null;
         this.adapter = null;
-        
+
         console.log('[BLEDiscovery] Initialized at:', getCurrentTimestamp());
     }
 
@@ -75,10 +75,16 @@ class BLEDiscovery {
             );
         }
 
+        // Se c'è già una discovery in corso, non ne avviamo un'altra
+        if (this.isDiscovering) {
+            console.debug('StartDiscovery: discovery già in corso');
+            return true;
+        }
+
         try {
             // Assicura che eventuali discovery precedenti siano fermati
             await this.ensureDiscoveryStopped();
-            
+
             this.eventManager.emit(BLEDiscoveryEvents.STARTING, {
                 timestamp: getCurrentTimestamp()
             });
@@ -86,7 +92,7 @@ class BLEDiscovery {
             // Avvia la discovery sull'adapter BLE
             await this.adapter.startDiscovery();
             this.isDiscovering = true;
-            
+
             // Avvia il loop di polling in background per controllare continuamente i dispositivi rilevati
             (async () => {
                 while (this.isDiscovering) {
@@ -130,108 +136,106 @@ class BLEDiscovery {
         }
     }
 
-/**
- * Ferma la discovery in modo sicuro.
- * Se la discovery non è attiva, registra solo un messaggio informativo senza emettere l'evento discovery:stopped.
- * @returns {Promise<void>}
- */
-async stopDiscovery() {
-    try {
-      // Se è attivo un timer della discovery, lo cancelliamo
-      if (this.discoveryTimer) {
-        clearTimeout(this.discoveryTimer);
-        this.discoveryTimer = null;
-      }
-  
-      // Controlliamo se la discovery è attiva
-      if (this.isDiscovering) {
-        // Emettiamo l'evento di stop in corso
-        this.eventManager.emit('discovery:stopping', {
-          timestamp: getCurrentTimestamp()
-        });
-  
+    /**
+     * Ferma la discovery in modo sicuro.
+     * Se la discovery non è attiva, registra solo un messaggio informativo senza emettere l'evento discovery:stopped.
+     * @returns {Promise<void>}
+     */
+    async stopDiscovery() {
         try {
-          await this.adapter.stopDiscovery();
+            // Se è attivo un timer della discovery, lo cancelliamo
+            if (this.discoveryTimer) {
+                clearTimeout(this.discoveryTimer);
+                this.discoveryTimer = null;
+            }
+
+            // Controlliamo se la discovery è attiva
+            if (!this.adapter || !this.isDiscovering) {
+                // Nessuna discovery attiva o adapter non disponibile
+                console.debug('StopDiscovery: nessuna discovery attiva');
+                return;
+            }
+
+            // Impostiamo subito la discovery come non attiva per evitare race conditions
+            this.isDiscovering = false;
+
+            // Emettiamo l'evento di stop in corso
+            this.eventManager.emit('discovery:stopping', {
+                timestamp: getCurrentTimestamp()
+            });
+
+            try {
+                await this.adapter.stopDiscovery();
+            } catch (error) {
+                // Se l'errore indica che la discovery non era attiva, è ok
+                if (!error.message.includes('No discovery started')) {
+                    throw error;  // Rilanciamo solo gli errori non previsti
+                }
+            }
+
+            // Emettiamo l'evento di discovery stoppata
+            this.eventManager.emit('discovery:stopped', {
+                devicesFound: this.discoveredDevices.size,
+                timestamp: getCurrentTimestamp()
+            });
+
         } catch (error) {
-          // Se l'errore indica che la discovery non era attiva, logghiamo un messaggio informativo
-          if (error.message.includes('No discovery started')) {
-            console.info('La discovery era già interrotta.');
-          } else {
-            // Altrimenti rilanciamo l'errore
-            throw error;
-          }
+            handleError(
+                new BLEError(
+                    'Errore durante l\'arresto della discovery',
+                    ErrorCodes.BLE.DISCOVERY_ERROR,
+                    { error: error.message }
+                ),
+                'BLEDiscovery.stopDiscovery'
+            );
         }
-  
-        // Impostiamo la discovery come non attiva
-        this.isDiscovering = false;
-  
-        // Emettiamo l'evento di discovery stoppata
-        // Nota: questo evento viene emesso esclusivamente se la discovery era attiva
-        this.eventManager.emit('discovery:stopped', {
-          devicesFound: this.discoveredDevices.size,
-          timestamp: getCurrentTimestamp()
-        });
-      } else {
-        // Nessuna discovery attiva; registriamo solo un messaggio informativo
-        console.info('StopDiscovery chiamato: la discovery non era attiva, nessun evento "discovery:stopped" verrà emesso.');
-      }
-    } catch (error) {
-      handleError(
-        new BLEError(
-          'Errore durante l\'arresto della discovery',
-          ErrorCodes.BLE.DISCOVERY_ERROR,
-          { error: error.message }
-        ),
-        'BLEDiscovery.stopDiscovery'
-      );
     }
-  }
 
     /**
 //  * Ferma la discovery in modo sicuro
 //  * @returns {Promise<void>}
 //  */
-// async stopDiscovery() {
-//     try {
-//       if (this.discoveryTimer) {
-//         clearTimeout(this.discoveryTimer);
-//         this.discoveryTimer = null;
-//       }
-  
-//       if (this.isDiscovering) {
-//         this.eventManager.emit(BLEDiscoveryEvents.STOPPING, {
-//           timestamp: getCurrentTimestamp()
-//         });
-  
-//         try {
-//           await this.adapter.stopDiscovery();
-//         } catch (error) {
-//           // Se l'errore indica che la discovery non era attiva, logga come informazione
-//           if (error.message.includes('No discovery started')) {
-//             console.info('La discovery era già interrotta.');
-//           } else {
-//             // Altrimenti, rilancia l'errore per il gestore
-//             throw error;
-//           }
-//         }
-  
-//         this.isDiscovering = false;
-//         this.eventManager.emit(BLEDiscoveryEvents.STOPPING, {
-//           devicesFound: this.discoveredDevices.size,
-//           timestamp: getCurrentTimestamp()
-//         });
-//       }
-//     } catch (error) {
-//       handleError(
-//         new BLEError(
-//           'Errore durante l\'arresto della discovery',
-//           ErrorCodes.BLE.DISCOVERY_ERROR,
-//           { error: error.message }
-//         ),
-//         'BLEDiscovery.stopDiscovery'
-//       );
-//     }
-//   }
+    // async stopDiscovery() {
+    //     try {
+    //       if (this.discoveryTimer) {
+    //         clearTimeout(this.discoveryTimer);
+    //         this.discoveryTimer = null;
+    //       }
+
+    //       if (this.isDiscovering) {
+    //         this.eventManager.emit(BLEDiscoveryEvents.STOPPING, {
+    //           timestamp: getCurrentTimestamp()
+    //         });
+
+    //         try {
+    //           await this.adapter.stopDiscovery();
+    //         } catch (error) {
+    //           // Se l'errore indica che la discovery non era attiva, logga come informazione
+    //           if (error.message.includes('No discovery started')) {
+    //             console.info('La discovery era già interrotta.');
+    //           } else {
+    //             // Altrimenti, rilancia l'errore per il gestore
+    //             throw error;
+    //           }
+    //         }
+
+    //         this.isDiscovering = false;
+    //         this.eventManager.emit(BLEDiscoveryEvents.STOPPING, {
+    //           devicesFound: this.discoveredDevices.size,
+    //           timestamp: getCurrentTimestamp()
+    //         });
+    //       }
+    //     } catch (error) {
+    //       handleError(
+    //         new BLEError(
+    //           'Errore durante l\'arresto della discovery',
+    //           ErrorCodes.BLE.DISCOVERY_ERROR,
+    //           { error: error.message }
+    //         ),
+    //         'BLEDiscovery.stopDiscovery'
+    //       );
+    //     }
+    //   }
 
     /**
      * Si assicura che la discovery sia fermata
@@ -279,7 +283,7 @@ async stopDiscovery() {
 
                         if (this.matchesCriteria(deviceInfo, criteria)) {
                             await this.stopDiscovery();
-                            
+
                             this.eventManager.emit(BLEDiscoveryEvents.DEVICE_FOUND, {
                                 ...deviceInfo,
                                 timestamp: getCurrentTimestamp()
@@ -296,7 +300,7 @@ async stopDiscovery() {
             }
 
             await this.stopDiscovery();
-            
+
             this.eventManager.emit(BLEDiscoveryEvents.SEARCH_TIMEOUT, {
                 criteria,
                 timeout,
@@ -314,7 +318,7 @@ async stopDiscovery() {
                 ),
                 'BLEDiscovery.findDevice'
             );
-            
+
             await this.stopDiscovery();
             return null;
         }
@@ -398,13 +402,27 @@ async stopDiscovery() {
      * Pulisce le risorse utilizzate
      */
     async cleanup() {
-        await this.stopDiscovery();
-        this.discoveredDevices.clear();
-        this.adapter = null;
-        
-        this.eventManager.emit(BLEDiscoveryEvents.CLEANUP, {
-            timestamp: getCurrentTimestamp()
-        });
+        // Aggiungi un flag per evitare cleanup multipli
+        if (this._cleanupInProgress) {
+            return;
+        }
+        this._cleanupInProgress = true;
+
+        try {
+            // Solo se la discovery è attiva, chiamiamo stopDiscovery
+            if (this.isDiscovering) {
+                await this.stopDiscovery();
+            }
+
+            this.discoveredDevices.clear();
+            this.adapter = null;
+
+            this.eventManager.emit(BLEDiscoveryEvents.CLEANUP, {
+                timestamp: getCurrentTimestamp()
+            });
+        } finally {
+            this._cleanupInProgress = false;
+        }
     }
 
     /**
