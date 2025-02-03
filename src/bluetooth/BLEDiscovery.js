@@ -3,8 +3,9 @@
  * Gestisce la scoperta dei dispositivi Bluetooth Low Energy
  * 
  * Created: 2025-02-01 18:28:48
+ * Updated: 2025-02-03 09:11:47
  * Author: arkproject
- * Version: 2.0.0
+ * Version: 2.1.0
  */
 
 const { BLEError, handleError, ErrorCodes } = require('../utils/errorHandler');
@@ -20,6 +21,7 @@ const BLEDiscoveryEvents = {
     STARTING: 'discovery:starting',
     STARTED: 'discovery:started',
     DEVICE_FOUND: 'discovery:device_found',
+    DEVICE_UPDATED: 'discovery:device_updated',
     STOPPING: 'discovery:stopping',
     STOPPED: 'discovery:stopped',
     ADAPTER_SET: 'discovery:adapter_set',
@@ -27,6 +29,12 @@ const BLEDiscoveryEvents = {
     SEARCH_STARTED: 'discovery:search_started',
     CLEANUP: 'discovery:cleanup',
     ERROR: 'discovery:error',
+};
+
+// Configurazione della cache
+const CACHE_CONFIG = {
+    MAX_AGE: 10000, // 10 secondi
+    CLEANUP_INTERVAL: 30000 // 30 secondi
 };
 
 class BLEDiscovery {
@@ -43,13 +51,65 @@ class BLEDiscovery {
 
         this.eventManager = eventManager;
         this.isDiscovering = false;
-        // Mappa per tracciare i dispositivi univoci
         this.discoveredDevices = new Map();
-        // Timer usato in altri contesti (es. findDevice)
         this.discoveryTimer = null;
         this.adapter = null;
+        this._cleanupInProgress = false;
+        this._cacheCleanupInterval = null;
+
+        // Avvia il timer di pulizia della cache
+        this._startCacheCleanup();
 
         console.log('[BLEDiscovery] Initialized at:', getCurrentTimestamp());
+    }
+
+    /**
+     * Avvia il timer di pulizia della cache
+     * @private
+     */
+    _startCacheCleanup() {
+        if (this._cacheCleanupInterval) {
+            clearInterval(this._cacheCleanupInterval);
+        }
+
+        this._cacheCleanupInterval = setInterval(() => {
+            this._cleanupCache();
+        }, CACHE_CONFIG.CLEANUP_INTERVAL);
+    }
+
+    /**
+     * Pulisce la cache dei dispositivi scaduti
+     * @private
+     */
+    _cleanupCache() {
+        const currentTime = Date.now();
+        let cleanedCount = 0;
+
+        for (const [address, device] of this.discoveredDevices.entries()) {
+            if (!this.isCacheValid(address)) {
+                this.discoveredDevices.delete(address);
+                cleanedCount++;
+            }
+        }
+
+        if (cleanedCount > 0) {
+            console.debug(`[Cache] Rimossi ${cleanedCount} dispositivi scaduti`);
+        }
+    }
+
+    /**
+     * Controlla se la cache di un dispositivo è valida
+     * @param {string} address - Indirizzo del dispositivo
+     * @param {number} maxAge - Età massima della cache in millisecondi
+     * @returns {boolean}
+     */
+    isCacheValid(address, maxAge = CACHE_CONFIG.MAX_AGE) {
+        const cachedDevice = this.discoveredDevices.get(address);
+        if (!cachedDevice) return false;
+        
+        const currentTime = Date.now();
+        const deviceTime = new Date(cachedDevice.timestamp).getTime();
+        return (currentTime - deviceTime) < maxAge;
     }
 
     /**
@@ -75,50 +135,64 @@ class BLEDiscovery {
             );
         }
 
-        // Se c'è già una discovery in corso, non ne avviamo un'altra
         if (this.isDiscovering) {
             console.debug('StartDiscovery: discovery già in corso');
             return true;
         }
 
         try {
-            // Assicura che eventuali discovery precedenti siano fermati
             await this.ensureDiscoveryStopped();
 
             this.eventManager.emit(BLEDiscoveryEvents.STARTING, {
                 timestamp: getCurrentTimestamp()
             });
 
-            // Avvia la discovery sull'adapter BLE
+            // Pulisci la cache all'avvio della discovery
+            this.discoveredDevices.clear();
+
             await this.adapter.startDiscovery();
             this.isDiscovering = true;
 
-            // Avvia il loop di polling in background per controllare continuamente i dispositivi rilevati
+            // Avvia il loop di polling in background
             (async () => {
                 while (this.isDiscovering) {
                     try {
                         const devices = await this.adapter.devices();
+                        const currentTime = Date.now();
+                        
                         for (const address of devices) {
-                            if (!this.discoveredDevices.has(address)) {
-                                try {
+                            try {
+                                // Verifica se il dispositivo è già in cache e se è ancora valido
+                                const isCacheValid = this.isCacheValid(address);
+
+                                if (!isCacheValid) {
                                     const device = await this.adapter.getDevice(address);
                                     const deviceInfo = await this.getDeviceInfo(device, address);
-                                    // Salva il dispositivo se non è già stato registrato
-                                    this.discoveredDevices.set(address, deviceInfo);
-                                    // Emette un evento per il nuovo dispositivo trovato
-                                    this.eventManager.emit(BLEDiscoveryEvents.DEVICE_FOUND, {
+                                    
+                                    const isNewDevice = !this.discoveredDevices.has(address);
+                                    
+                                    // Aggiorna la cache
+                                    this.discoveredDevices.set(address, {
                                         ...deviceInfo,
                                         timestamp: getCurrentTimestamp()
                                     });
-                                } catch (innerError) {
-                                    console.log(`Errore nel processare il dispositivo ${address}:`, innerError.message);
+
+                                    // Emette l'evento appropriato
+                                    this.eventManager.emit(
+                                        isNewDevice ? BLEDiscoveryEvents.DEVICE_FOUND : BLEDiscoveryEvents.DEVICE_UPDATED,
+                                        {
+                                            ...deviceInfo,
+                                            timestamp: getCurrentTimestamp()
+                                        }
+                                    );
                                 }
+                            } catch (innerError) {
+                                console.log(`Errore nel processare il dispositivo ${address}:`, innerError.message);
                             }
                         }
                     } catch (pollError) {
                         console.error('Errore durante il polling dei dispositivi:', pollError);
                     }
-                    // Attende 1000ms prima di ripetere il polling
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 }
             })();
@@ -128,6 +202,7 @@ class BLEDiscovery {
             });
 
             return true;
+
         } catch (error) {
             if (error.message.includes('No discovery started')) {
                 return true;
@@ -138,43 +213,35 @@ class BLEDiscovery {
 
     /**
      * Ferma la discovery in modo sicuro.
-     * Se la discovery non è attiva, registra solo un messaggio informativo senza emettere l'evento discovery:stopped.
      * @returns {Promise<void>}
      */
     async stopDiscovery() {
         try {
-            // Se è attivo un timer della discovery, lo cancelliamo
             if (this.discoveryTimer) {
                 clearTimeout(this.discoveryTimer);
                 this.discoveryTimer = null;
             }
 
-            // Controlliamo se la discovery è attiva
             if (!this.adapter || !this.isDiscovering) {
-                // Nessuna discovery attiva o adapter non disponibile
                 console.debug('StopDiscovery: nessuna discovery attiva');
                 return;
             }
 
-            // Impostiamo subito la discovery come non attiva per evitare race conditions
             this.isDiscovering = false;
 
-            // Emettiamo l'evento di stop in corso
-            this.eventManager.emit('discovery:stopping', {
+            this.eventManager.emit(BLEDiscoveryEvents.STOPPING, {
                 timestamp: getCurrentTimestamp()
             });
 
             try {
                 await this.adapter.stopDiscovery();
             } catch (error) {
-                // Se l'errore indica che la discovery non era attiva, è ok
                 if (!error.message.includes('No discovery started')) {
-                    throw error;  // Rilanciamo solo gli errori non previsti
+                    throw error;
                 }
             }
 
-            // Emettiamo l'evento di discovery stoppata
-            this.eventManager.emit('discovery:stopped', {
+            this.eventManager.emit(BLEDiscoveryEvents.STOPPED, {
                 devicesFound: this.discoveredDevices.size,
                 timestamp: getCurrentTimestamp()
             });
@@ -190,52 +257,6 @@ class BLEDiscovery {
             );
         }
     }
-
-    /**
-//  * Ferma la discovery in modo sicuro
-//  * @returns {Promise<void>}
-//  */
-    // async stopDiscovery() {
-    //     try {
-    //       if (this.discoveryTimer) {
-    //         clearTimeout(this.discoveryTimer);
-    //         this.discoveryTimer = null;
-    //       }
-
-    //       if (this.isDiscovering) {
-    //         this.eventManager.emit(BLEDiscoveryEvents.STOPPING, {
-    //           timestamp: getCurrentTimestamp()
-    //         });
-
-    //         try {
-    //           await this.adapter.stopDiscovery();
-    //         } catch (error) {
-    //           // Se l'errore indica che la discovery non era attiva, logga come informazione
-    //           if (error.message.includes('No discovery started')) {
-    //             console.info('La discovery era già interrotta.');
-    //           } else {
-    //             // Altrimenti, rilancia l'errore per il gestore
-    //             throw error;
-    //           }
-    //         }
-
-    //         this.isDiscovering = false;
-    //         this.eventManager.emit(BLEDiscoveryEvents.STOPPING, {
-    //           devicesFound: this.discoveredDevices.size,
-    //           timestamp: getCurrentTimestamp()
-    //         });
-    //       }
-    //     } catch (error) {
-    //       handleError(
-    //         new BLEError(
-    //           'Errore durante l\'arresto della discovery',
-    //           ErrorCodes.BLE.DISCOVERY_ERROR,
-    //           { error: error.message }
-    //         ),
-    //         'BLEDiscovery.stopDiscovery'
-    //       );
-    //     }
-    //   }
 
     /**
      * Si assicura che la discovery sia fermata
@@ -278,8 +299,16 @@ class BLEDiscovery {
 
                 for (const address of devices) {
                     try {
+                        if (this.isCacheValid(address)) {
+                            const cachedDevice = this.discoveredDevices.get(address);
+                            if (this.matchesCriteria(cachedDevice, criteria)) {
+                                return await this.adapter.getDevice(address);
+                            }
+                            continue;
+                        }
+
                         const device = await this.adapter.getDevice(address);
-                        const deviceInfo = await this.getDeviceInfo(device);
+                        const deviceInfo = await this.getDeviceInfo(device, address);
 
                         if (this.matchesCriteria(deviceInfo, criteria)) {
                             await this.stopDiscovery();
@@ -346,7 +375,6 @@ class BLEDiscovery {
      */
     async getDeviceInfo(device, address) {
         try {
-            // Nome dispositivo
             const name = await Promise.race([
                 device.getName(),
                 new Promise((_, reject) =>
@@ -354,10 +382,8 @@ class BLEDiscovery {
                 )
             ]).catch(() => 'Sconosciuto');
 
-            // RSSI con gestione alternativa
             let rssi = null;
             try {
-                // Prima proviamo il metodo standard
                 rssi = await Promise.race([
                     device.getRSSI(),
                     new Promise((_, reject) =>
@@ -365,7 +391,6 @@ class BLEDiscovery {
                     )
                 ]);
             } catch (rssiError) {
-                // Se fallisce, proviamo a ottenere l'RSSI dalle properties
                 try {
                     const properties = await device.getProperties();
                     if (properties && properties.RSSI) {
@@ -378,14 +403,12 @@ class BLEDiscovery {
                 }
             }
 
-            const deviceInfo = {
+            return {
                 address,
                 name: name || 'Sconosciuto',
                 rssi: rssi !== null ? `${rssi} dBm` : 'Non disponibile',
                 timestamp: getCurrentTimestamp()
             };
-
-            return deviceInfo;
 
         } catch (error) {
             console.log(`Debug - Errore critico in getDeviceInfo per ${address}:`, error.message);
@@ -399,17 +422,34 @@ class BLEDiscovery {
     }
 
     /**
+     * Restituisce i dispositivi scoperti
+     * @param {boolean} includeExpired - Se true, include anche i dispositivi con cache scaduta
+     * @returns {Array}
+     */
+    getDiscoveredDevices(includeExpired = false) {
+        if (includeExpired) {
+            return Array.from(this.discoveredDevices.values());
+        }
+
+        return Array.from(this.discoveredDevices.values())
+            .filter(device => this.isCacheValid(device.address));
+    }
+
+    /**
      * Pulisce le risorse utilizzate
      */
     async cleanup() {
-        // Aggiungi un flag per evitare cleanup multipli
         if (this._cleanupInProgress) {
             return;
         }
         this._cleanupInProgress = true;
 
         try {
-            // Solo se la discovery è attiva, chiamiamo stopDiscovery
+            if (this._cacheCleanupInterval) {
+                clearInterval(this._cacheCleanupInterval);
+                this._cacheCleanupInterval = null;
+            }
+
             if (this.isDiscovering) {
                 await this.stopDiscovery();
             }
@@ -423,14 +463,6 @@ class BLEDiscovery {
         } finally {
             this._cleanupInProgress = false;
         }
-    }
-
-    /**
-     * Restituisce i dispositivi scoperti
-     * @returns {Array}
-     */
-    getDiscoveredDevices() {
-        return Array.from(this.discoveredDevices.values());
     }
 }
 
